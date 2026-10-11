@@ -273,6 +273,145 @@ class TestMetrics(unittest.TestCase):
         pass
 
 
+class TestTiedScoreMetrics(unittest.TestCase):
+    """Ties at the rank-n cutoff must not corrupt precision @ rank n
+    (issue #760). The old percentile cut dropped the whole tied block, so
+    the flagged count fell below n and precision divided by that smaller
+    count."""
+
+    def test_precision_n_scores_tie_at_cutoff(self):
+        # one outlier on top, the other 99 scores identical: the tied block
+        # fills the remaining 4 of n=5 slots, 4 of its 99 rows are outliers
+        y = np.zeros(100)
+        y[:5] = 1
+        y_pred = np.array([1.0] + [0.0] * 99)
+        assert_allclose(precision_n_scores(y, y_pred), 0.2323, atol=1e-4)
+
+    def test_precision_n_scores_coarse_plateau(self):
+        # 3 outliers on top, 7 outliers inside a 97-row plateau
+        y = np.zeros(100)
+        y[:10] = 1
+        y_pred = np.array([1.0] * 3 + [0.0] * 97)
+        assert_allclose(precision_n_scores(y, y_pred), 0.3505, atol=1e-4)
+
+    def test_precision_n_scores_histogram_style(self):
+        # 4 outliers at the top score, 20 rows tied at the cutoff score with
+        # 6 outliers among them
+        y = np.zeros(100)
+        y_pred = np.zeros(100)
+        y_pred[:4] = 3.0
+        y[:4] = 1
+        y_pred[4:24] = 2.0
+        y[4:10] = 1
+        assert_allclose(precision_n_scores(y, y_pred), 0.58, atol=1e-4)
+
+    def test_precision_n_scores_all_tied_at_max(self):
+        # 15 rows tied at the maximum hold all 10 outliers: every row of the
+        # tied block is equally likely to sit in the top 10
+        y = np.zeros(100)
+        y_pred = np.zeros(100)
+        y_pred[85:] = 1.0
+        y[85:95] = 1
+        assert_allclose(precision_n_scores(y, y_pred), 10 / 15, atol=1e-4)
+
+    def test_precision_n_scores_constant_scores_report_prevalence(self):
+        # a constant-score column carries no signal, so its expected
+        # precision is the outlier prevalence, not 0.0
+        y = np.zeros(100)
+        y[:10] = 1
+        y_pred = np.zeros(100)
+        assert_allclose(precision_n_scores(y, y_pred), 0.1, atol=1e-4)
+
+    def test_precision_n_scores_distinct_scores_unchanged(self):
+        # with distinct scores the flagged rows are exactly the top n, so
+        # the value must match the old behavior
+        y = np.zeros(100)
+        y_pred = np.linspace(0.05, 1.0, 100)
+        y[[91, 93, 95, 97, 99]] = 1
+        y[[3, 7, 11, 33, 55]] = 1
+        assert_allclose(precision_n_scores(y, y_pred), 0.5)
+
+        # perfect and inverted rankings are the two extremes
+        y_perfect = np.zeros(100)
+        y_perfect[:10] = 1
+        assert_allclose(
+            precision_n_scores(y_perfect, np.linspace(0, 1, 100)[::-1]), 1.0)
+
+        y_inverted = np.zeros(100)
+        y_inverted[:10] = 1
+        assert_allclose(
+            precision_n_scores(y_inverted, np.linspace(0, 1, 100)), 0.0)
+
+    def test_precision_n_scores_explicit_n_with_ties(self):
+        # n=3 with one outlier on top of a 9-row plateau that holds the
+        # other two outliers
+        y = np.zeros(10)
+        y[:3] = 1
+        y_pred = np.array([1.0] + [0.0] * 9)
+        assert_allclose(precision_n_scores(y, y_pred, n=3), 13 / 27,
+                        atol=1e-4)
+
+    def test_precision_n_scores_n_out_of_range(self):
+        y = [0, 1, 1, 0]
+        y_pred = [0.1, 0.9, 0.8, 0.2]
+        # n larger than the sample count was rejected before; keep that
+        with assert_raises(ValueError):
+            precision_n_scores(y, y_pred, n=10)
+        with assert_raises(ValueError):
+            precision_n_scores(y, y_pred, n=-2)
+        # explicit n=0 is well-defined and stays 0.0
+        assert_allclose(precision_n_scores(y, y_pred, n=0), 0.0)
+
+    def test_get_label_n_flags_at_least_n(self):
+        # the old percentile cut dropped the whole tied block and flagged
+        # 1 row where n=5 was asked for
+        y = np.zeros(100)
+        y[:5] = 1
+        y_pred = np.array([1.0] + [0.0] * 99)
+        labels = get_label_n(y, y_pred)
+        assert labels.sum() >= 5
+
+        # all-tied scores: every row is at the cutoff, so no row can be
+        # distinguished and the whole block is flagged
+        y2 = np.zeros(100)
+        y2[85:95] = 1
+        y_pred2 = np.zeros(100)
+        y_pred2[85:] = 1.0
+        labels2 = get_label_n(y2, y_pred2)
+        assert_equal(labels2.sum(), 15)
+
+    def test_get_label_n_distinct_scores_unchanged(self):
+        # the existing fixture behavior must survive the cutoff change
+        y = [0, 0, 1, 1, 1, 0, 0, 0, 1, 0]
+        y_pred = [0.1, 0.2, 0.2, 0.8, 0.2, 0.5, 0.7, 0.9, 1, 0.3]
+        manual_labels = [0, 0, 0, 1, 0, 0, 1, 1, 1, 0]
+        assert_allclose(get_label_n(y, y_pred), manual_labels)
+        assert_allclose(get_label_n(y, y_pred, n=3),
+                        [0, 0, 0, 1, 0, 0, 0, 1, 1, 0])
+
+    def test_score_to_label_tie_at_threshold(self):
+        # 20 identical scores spanning the 10% cut: the old strict '>'
+        # flagged 0 of 20 samples
+        pred_scores = np.zeros(20)
+        assert_equal(score_to_label(pred_scores, outliers_fraction=0.5),
+                    np.ones(20))
+        # a cut that lands exactly on a score now keeps that score
+        pred_scores = np.array([0.0] * 9 + [5.0] + [9.0] * 10)
+        # the interpolated 90th percentile of these 20 values is 9.0, a
+        # score held by 10 rows: with >= those 10 rows are kept instead of
+        # none, which is the top-half share the 10% cut asks for
+        labels = score_to_label(pred_scores, outliers_fraction=0.1)
+        assert_equal(labels.sum(), 10)
+
+    def test_get_label_n_zero_outliers(self):
+        # no outliers in y and n omitted: all-zero labels, no crash
+        labels = get_label_n([0, 0, 0, 0], [0.1, 0.9, 0.8, 0.2])
+        assert_equal(labels, np.zeros(4))
+
+    def tearDown(self):
+        pass
+
+
 class TestCheckDetector(unittest.TestCase):
 
     def setUp(self):

@@ -12,7 +12,6 @@ import numbers
 import numpy as np
 import sklearn
 from numpy import percentile
-from sklearn.metrics import precision_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import check_array
 from sklearn.utils import check_consistent_length
@@ -193,7 +192,10 @@ def score_to_label(pred_scores, outliers_fraction=0.1):
     check_parameter(outliers_fraction, 0, 1)
 
     threshold = percentile(pred_scores, 100 * (1 - outliers_fraction))
-    pred_labels = (pred_scores > threshold).astype('int')
+    # Ties at the threshold were dropped entirely by a strict '>', which can
+    # flag far fewer samples than outliers_fraction asks for (see issue #760).
+    # Including the threshold keeps the flagged count at the requested share.
+    pred_labels = (pred_scores >= threshold).astype('int')
     return pred_labels
 
 
@@ -218,14 +220,30 @@ def precision_n_scores(y, y_pred, n=None):
 
     """
 
-    # turn raw prediction decision scores into binary labels
-    y_pred = get_label_n(y, y_pred, n)
-
-    # enforce formats of y and labels_
+    # enforce formats of y and scores
     y = column_or_1d(y)
     y_pred = column_or_1d(y_pred)
+    check_consistent_length(y, y_pred)
 
-    return precision_score(y, y_pred)
+    if n is not None:
+        check_parameter(n, 0, len(y_pred), include_left=True,
+                        include_right=True, param_name='n')
+    n = int(np.count_nonzero(y)) if n is None else int(n)
+    if n == 0:
+        return 0.0
+
+    # Precision @ rank n with a tie-aware expectation: when scores tie at the
+    # rank-n cutoff, the tied block straddles the boundary, so its hits are
+    # counted pro rata and the denominator is n, not the number of flagged
+    # rows (issue #760). With distinct scores every row of the old code and
+    # this one agree, including a constant-score column's 0.0 prevalence.
+    cut = np.sort(y_pred)[-n]  # score of the n-th ranked sample
+    above = y_pred > cut
+    tied = y_pred == cut
+    slots = n - above.sum()  # rank positions left for the tied block
+    hits = y[above].sum() + slots * y[tied].mean()
+
+    return float(hits / n)
 
 
 def get_label_n(y, y_pred, n=None):
@@ -265,14 +283,27 @@ def get_label_n(y, y_pred, n=None):
     check_consistent_length(y, y_pred)
     y_len = len(y)  # the length of targets
 
-    # calculate the percentage of outliers
+    # resolve the number of outliers to flag: n when given, otherwise the
+    # number of outliers in y. n must stay in [0, y_len], the same range the
+    # previous percentile cut accepted.
     if n is not None:
-        outliers_fraction = n / y_len
+        check_parameter(n, 0, y_len, include_left=True, include_right=True,
+                        param_name='n')
+        n_outliers = int(n)
     else:
-        outliers_fraction = np.count_nonzero(y) / y_len
+        n_outliers = int(np.count_nonzero(y))
 
-    threshold = percentile(y_pred, 100 * (1 - outliers_fraction))
-    y_pred = (y_pred > threshold).astype('int')
+    if n_outliers == 0:
+        return np.zeros(y_len, dtype=int)
+
+    # Flag the top n scores, ties included. The old percentile cut could land
+    # on a block of tied scores, and a strict '>' then dropped the whole block
+    # and flagged fewer than n samples (issue #760). Cutting at the n-th
+    # ranked score with '>=' matches argmaxn's tie handling below, so the
+    # flagged count is never below n, and rows tied at the cutoff are all
+    # treated the same way instead of all being discarded.
+    threshold = np.sort(y_pred)[-n_outliers]
+    y_pred = (y_pred >= threshold).astype('int')
 
     return y_pred
 
