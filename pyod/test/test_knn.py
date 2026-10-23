@@ -354,6 +354,23 @@ class TestKnnNearestNeighborsConfig(unittest.TestCase):
             n_train=self.n_train, n_test=self.n_test,
             contamination=0.1, random_state=42)
 
+    def test_set_params_metric_reaches_the_estimator(self):
+        # Regression test for #783: set_params(metric=...) used to update
+        # get_params but leave the estimator built in __init__ scoring with
+        # the constructor's metric.
+        X = np.array([[0., 0.], [1., 2.], [3., 1.], [6., 4.], [10., 10.]])
+        query = np.array([[12., 0.]])
+
+        updated = KNN(n_neighbors=2, n_jobs=1).set_params(metric='manhattan')
+        updated.fit(X)
+        direct = KNN(n_neighbors=2, metric='manhattan', n_jobs=1).fit(X)
+
+        assert_equal(updated.get_params()['metric'], 'manhattan')
+        assert_equal(updated.neigh_.metric, 'manhattan')
+        assert_equal(updated.decision_function(query),
+                     direct.decision_function(query))
+        assert_equal(updated.predict(query), direct.predict(query))
+
     def test_neighbor_params_propagation(self):
         clf = KNN(n_neighbors=7, algorithm='kd_tree', n_jobs=-1)
         clf.fit(self.X_train)

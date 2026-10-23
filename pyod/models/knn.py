@@ -156,15 +156,6 @@ class KNN(BaseDetector):
                  'in version 0.7.6. By default, ball_tree will be used.',
                  FutureWarning)
 
-        self.neigh_ = NearestNeighbors(n_neighbors=self.n_neighbors,
-                                       radius=self.radius,
-                                       algorithm=self.algorithm,
-                                       leaf_size=self.leaf_size,
-                                       metric=self.metric,
-                                       p=self.p,
-                                       metric_params=self.metric_params,
-                                       n_jobs=self.n_jobs)
-
     def fit(self, X, y=None):
         """Fit detector. y is ignored in unsupervised methods.
 
@@ -186,6 +177,18 @@ class KNN(BaseDetector):
         X = check_array(X)
         self._set_n_classes(y)
 
+        # Build the neighbor estimator here, not in __init__, so every
+        # parameter set after construction -- set_params(metric=...),
+        # grid searches, clones re-configured before fit -- reaches the
+        # estimator that actually scores. See issue #783.
+        self.neigh_ = NearestNeighbors(n_neighbors=self.n_neighbors,
+                                       radius=self.radius,
+                                       algorithm=self.algorithm,
+                                       leaf_size=self.leaf_size,
+                                       metric=self.metric,
+                                       p=self.p,
+                                       metric_params=self.metric_params,
+                                       n_jobs=self.n_jobs)
         self.neigh_.fit(X)
 
         # Brute-force backends do not expose an internal tree. Reuse the
